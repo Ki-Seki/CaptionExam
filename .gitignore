@@ -1,0 +1,8 @@
+# The benchmark itself lives on the Hugging Face Hub; `captionexam download` puts it here
+/data/
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
