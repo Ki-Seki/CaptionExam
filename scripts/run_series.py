@@ -15,6 +15,11 @@ models.json is a list of
    "extra_body": {...}, "vllm_args": [...]}            # last two optional
 in the order to run them; put small models first and the largest last.
 
+A model with a "base_url" is a hosted API instead, and "repo" is the model id it expects:
+nothing is downloaded or served, no GPU is used, up to --api-parallel of them caption at once,
+and the key comes from OPENAI_API_KEY. Any model may also set "image_detail", and
+"max_tokens" or "temperature", where null leaves the field out of the request.
+
 usage: python scripts/run_series.py --models models.json --weights /nvme/weights \
            [--data data] [--results results] [--on-update 'aws s3 sync results s3://...']
 """
@@ -29,7 +34,7 @@ import subprocess
 import threading
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,12 +61,15 @@ def gpu_ids():
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible:
         return [g for g in visible.split(",") if g]
-    out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []  # no GPUs here; hosted API models still run
     return out.stdout.split()
 
 
@@ -75,6 +83,27 @@ def gpu_name():
         return out.stdout.splitlines()[0].strip()
     except (OSError, IndexError):
         return None
+
+
+def tool_version(cmd):
+    try:
+        return subprocess.run(cmd + ["--version"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return None
+
+
+def is_api(m):
+    return bool(m.get("base_url"))
+
+
+def gpus_for(m):
+    return 0 if is_api(m) else m.get("tp", 1)
+
+
+def done_future(value):
+    f = Future()
+    f.set_result(value)
+    return f
 
 
 def captions_done(path, bench, pfp):
@@ -104,9 +133,7 @@ class Runner:
         self.judge_pause = threading.Event()  # set: the judge must hand its GPU back
         self.captioning_done = threading.Event()
         self.fetches = ThreadPoolExecutor(max_workers=args.fetch_workers)
-        self.vllm_version = subprocess.run(
-            shlex.split(args.vllm) + ["--version"], capture_output=True, text=True
-        ).stdout.strip()
+        self.vllm_version = tool_version(shlex.split(args.vllm))
         for sub in ("captions", "runs", "logs", "meta"):
             (self.results / sub).mkdir(parents=True, exist_ok=True)
 
@@ -121,6 +148,9 @@ class Runner:
     def give(self, gpus):
         with self.lock:
             self.free.extend(gpus)
+
+    def needs_whole_node(self, m):
+        return self.total > 0 and gpus_for(m) == self.total
 
     # ---- weights ----
     def fetch(self, m):
@@ -212,11 +242,21 @@ class Runner:
 
     # ---- one captioner ----
     def caption_model(self, m, path, gpus):
-        name, port = m["name"], 8100 + int(gpus[0])
+        name, api = m["name"], is_api(m)
         started = now()
-        logfile = self.results / "logs" / f"{name}.vllm.log"
-        extra = ["--tensor-parallel-size", str(m.get("tp", 1)), *m.get("vllm_args", [])]
-        proc = self.serve(m["repo"], path, gpus, port, logfile, self.args.caption_workers, extra)
+        max_tokens = m.get("max_tokens", self.args.max_tokens)
+        temperature = m.get("temperature", 0.0)
+        proc = None
+        if api:
+            base_url = m["base_url"]
+        else:
+            port = 8100 + int(gpus[0])
+            logfile = self.results / "logs" / f"{name}.vllm.log"
+            extra = ["--tensor-parallel-size", str(m.get("tp", 1)), *m.get("vllm_args", [])]
+            proc = self.serve(
+                m["repo"], path, gpus, port, logfile, self.args.caption_workers, extra
+            )
+            base_url = f"http://127.0.0.1:{port}/v1"
         try:
             run_captions(
                 self.bench,
@@ -224,33 +264,42 @@ class Runner:
                 model=m["repo"],
                 name=name,
                 prompt=self.prompt,
-                base_url=f"http://127.0.0.1:{port}/v1",
-                max_tokens=self.args.max_tokens,
-                temperature=0.0,
+                base_url=base_url,
+                max_tokens=max_tokens,
+                temperature=temperature,
                 workers=self.args.caption_workers,
                 extra_body=m.get("extra_body"),
+                image_detail=m.get("image_detail"),
                 log=log,
             )
         finally:
-            self.stop(proc)
+            if proc is not None:
+                self.stop(proc)
         rows = latest_by(read_jsonl(self.results / "captions" / f"{name}.jsonl"), "id")
         reasons = {}
         for r in rows.values():
             reasons[r.get("finish_reason")] = reasons.get(r.get("finish_reason"), 0) + 1
-        rev = path / ".captionexam_revision"
+        rev = path / ".captionexam_revision" if path else None
         meta = {
             "name": name,
             "repo": m["repo"],
-            "revision": rev.read_text().strip() if rev.exists() else None,
-            "tp": m.get("tp", 1),
-            "gpu": gpu_name(),
-            "vllm": self.vllm_version,
+            "revision": rev.read_text().strip() if rev and rev.exists() else None,
+            # what the server says it ran, e.g. the dated snapshot behind an API alias
+            "served_models": sorted(
+                {r["served_model"] for r in rows.values() if r.get("served_model")}
+            ),
+            "api": m.get("base_url"),
+            "tp": None if api else m.get("tp", 1),
+            "gpu": None if api else gpu_name(),
+            "vllm": None if api else self.vllm_version,
             "vllm_args": m.get("vllm_args", []),
             "extra_body": m.get("extra_body"),
-            "max_tokens": self.args.max_tokens,
-            "max_model_len": self.args.max_model_len,
-            "max_num_seqs": self.args.caption_workers,
-            "temperature": 0.0,
+            "image_detail": m.get("image_detail"),
+            "max_tokens": max_tokens,
+            "max_model_len": None if api else self.args.max_model_len,
+            "max_num_seqs": None if api else self.args.caption_workers,
+            "caption_workers": self.args.caption_workers,
+            "temperature": temperature,
             "prompt_fp": self.pfp,
             "captions": len(rows),
             "finish_reasons": reasons,
@@ -267,12 +316,15 @@ class Runner:
             ):
                 self.summary[m["name"]] = "already done"
                 self.to_judge.put(m["name"])  # judging fills any gaps
-            elif m.get("tp", 1) > self.total:
-                self.summary[m["name"]] = f"needs {m['tp']} GPUs, node has {self.total}"
+            elif gpus_for(m) > self.total:
+                self.summary[m["name"]] = f"needs {gpus_for(m)} GPUs, node has {self.total}"
             else:
                 todo.append(m)
         log(f"{len(todo)} of {len(self.models)} captioners to run on {self.total} GPUs")
-        weights = {m["name"]: self.fetches.submit(self.fetch, m) for m in todo}
+        weights = {
+            m["name"]: done_future(None) if is_api(m) else self.fetches.submit(self.fetch, m)
+            for m in todo
+        }
         running, pending = [], list(todo)
         while pending or running:
             for item in list(running):
@@ -283,8 +335,8 @@ class Runner:
             # The judge gives its GPU back only when a model that needs the whole node is next
             # in line with its weights on disk, or running
             head = pending[0] if pending else None
-            whole = [m for _, m, _ in running if m.get("tp", 1) == self.total]
-            if head and head.get("tp", 1) == self.total and weights[head["name"]].done():
+            whole = [m for _, m, _ in running if self.needs_whole_node(m)]
+            if head and self.needs_whole_node(head) and weights[head["name"]].done():
                 whole.append(head)
             if whole and not self.judge_pause.is_set():
                 log(f"pausing the judge for {whole[0]['name']}")
@@ -302,7 +354,10 @@ class Runner:
                     log(f"! fetch failed for {m['repo']}: {e}")
                     self.summary[m["name"]] = f"fetch failed: {e}"
                     continue
-                gpus = self.take(m.get("tp", 1))
+                apis = sum(is_api(r) for _, r, _ in running)
+                if is_api(m) and apis >= self.args.api_parallel:
+                    continue
+                gpus = self.take(gpus_for(m))
                 if gpus is None:
                     continue
                 pending.remove(m)
@@ -312,7 +367,7 @@ class Runner:
             time.sleep(POLL)
 
     def caption_worker(self, m, path, gpus):
-        log(f"start {m['name']} on GPUs {','.join(gpus)}")
+        log(f"start {m['name']} " + (f"on GPUs {','.join(gpus)}" if gpus else "via its API"))
         try:
             self.caption_model(m, path, gpus)
             self.summary[m["name"]] = "captioned"
@@ -423,6 +478,7 @@ def parse_args(argv=None):
     p.add_argument("--judge", default="microsoft/phi-4")
     p.add_argument("--judge-workers", type=int, default=64)
     p.add_argument("--caption-workers", type=int, default=16)
+    p.add_argument("--api-parallel", type=int, default=4, help="API models captioning at once")
     p.add_argument("--max-tokens", type=int, default=4096)
     p.add_argument("--max-model-len", type=int, default=16384)
     p.add_argument("--gpu-util", type=float, default=0.9)

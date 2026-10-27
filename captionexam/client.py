@@ -10,7 +10,7 @@ import time
 
 from openai import OpenAI
 
-RETRIES = 3
+RETRIES = 5  # hosted APIs answer bursts with rate-limit errors
 
 
 def make_client(base_url=None, api_key=None, timeout=600):
@@ -43,7 +43,9 @@ def chat(client, model, content, retries=RETRIES, **kwargs):
 
 def usage_of(response):
     u = getattr(response, "usage", None)
+    details = getattr(u, "completion_tokens_details", None)
     return {
         "prompt_tokens": getattr(u, "prompt_tokens", None),
         "completion_tokens": getattr(u, "completion_tokens", None),
+        "reasoning_tokens": getattr(details, "reasoning_tokens", None),
     }

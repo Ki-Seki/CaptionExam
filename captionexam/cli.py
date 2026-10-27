@@ -43,7 +43,13 @@ def cmd_caption(args):
         workers=args.workers,
         images=args.images.split(",") if args.images else None,
         extra_body=json.loads(args.extra_body) if args.extra_body else None,
+        image_detail=args.image_detail,
     )
+
+
+def _or_none(cast):
+    """An argparse type that also accepts "none", meaning: leave the field out."""
+    return lambda s: None if s.lower() == "none" else cast(s)
 
 
 def cmd_judge(args):
@@ -93,8 +99,9 @@ def main(argv=None):
     c.add_argument("--base-url", default=None, help="OpenAI-compatible endpoint")
     c.add_argument("--api-key", default=None)
     c.add_argument("--prompt-file", default=None, help="replace the default caption prompt")
-    c.add_argument("--max-tokens", type=int, default=4096)
-    c.add_argument("--temperature", type=float, default=0.0)
+    c.add_argument("--max-tokens", type=_or_none(int), default=4096, help='"none" leaves it out')
+    c.add_argument("--temperature", type=_or_none(float), default=0.0, help='"none" leaves it out')
+    c.add_argument("--image-detail", default=None, help='image "detail", e.g. high')
     c.add_argument("--workers", type=int, default=8)
     c.add_argument("--images", default=None, help="comma-separated image ids (default: all)")
     c.add_argument(

@@ -54,7 +54,7 @@ class FakeClient:
     def create(self, model, messages, **kwargs):
         content = messages[0]["content"]
         text = content if isinstance(content, str) else content[-1]["text"]
-        self.calls.append({"model": model, "text": text, **kwargs})
+        self.calls.append({"model": model, "text": text, "content": content, **kwargs})
         msg = SimpleNamespace(content=self.reply(text))
         return SimpleNamespace(
             choices=[SimpleNamespace(message=msg, finish_reason="stop")],

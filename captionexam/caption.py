@@ -24,6 +24,7 @@ def run_captions(
     workers=8,
     images=None,
     extra_body=None,
+    image_detail=None,
     log=print,
 ):
     """Write one caption per image to `out_path` (JSONL), skipping images already done.
@@ -31,6 +32,8 @@ def run_captions(
     A caption made with a different prompt is redone, so changing the prompt never mixes
     two prompts in one file. Rows: {"id", "caption", "model", "prompt_fp", ...}.
     `extra_body` is passed through to the server, e.g. to switch off a model's thinking mode.
+    `max_tokens` or `temperature` set to None are left out of the request, for APIs whose
+    reasoning models reject them; `image_detail` sets the image's "detail" (e.g. "high").
     """
     pfp = prompt_fp(prompt)
     done = {
@@ -44,26 +47,22 @@ def run_captions(
     client = make_client(base_url, api_key)
     lock = threading.Lock()
     pending, failed = [], []
+    params = {
+        k: v for k, v in (("max_tokens", max_tokens), ("temperature", temperature)) if v is not None
+    }
 
     def one(image_id):
-        content = [
-            {"type": "image_url", "image_url": {"url": image_url(bench.images[image_id])}},
-            {"type": "text", "text": prompt},
-        ]
-        r = chat(
-            client,
-            model,
-            content,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            extra_body=extra_body or None,
-        )
+        image = {"url": image_url(bench.images[image_id])}
+        if image_detail:
+            image["detail"] = image_detail
+        content = [{"type": "image_url", "image_url": image}, {"type": "text", "text": prompt}]
+        r = chat(client, model, content, extra_body=extra_body or None, **params)
         choice = r.choices[0]
         return {
             "id": image_id,
             "caption": (choice.message.content or "").strip(),
             "model": name,
-            "served_model": model,
+            "served_model": getattr(r, "model", None) or model,
             "prompt_fp": pfp,
             "finish_reason": choice.finish_reason,
             "usage": usage_of(r),

@@ -76,6 +76,26 @@ def test_caption_skips_done_images(bench, results, monkeypatch):
     assert len(fake.calls) == 2
 
 
+def test_caption_request_for_a_hosted_reasoning_model(bench, tmp_path, monkeypatch):
+    fake = FakeClient(lambda prompt: "An orange cat.")
+    monkeypatch.setattr(caption, "make_client", lambda *a, **k: fake)
+    caption.run_captions(
+        bench,
+        tmp_path / "gpt.jsonl",
+        "gpt-x",
+        "gpt-x",
+        "Describe.",
+        max_tokens=None,
+        temperature=None,
+        image_detail="high",
+        extra_body={"reasoning_effort": "none", "max_completion_tokens": 16384},
+    )
+    call = fake.calls[0]
+    assert "max_tokens" not in call and "temperature" not in call
+    assert call["extra_body"] == {"reasoning_effort": "none", "max_completion_tokens": 16384}
+    assert call["content"][0]["image_url"]["detail"] == "high"
+
+
 def test_judge_scores_and_reruns_only_gaps(bench, results, monkeypatch):
     answers = {
         "What color is the cat?": "orange",
