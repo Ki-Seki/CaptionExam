@@ -23,12 +23,14 @@ def run_captions(
     temperature=0.0,
     workers=8,
     images=None,
+    extra_body=None,
     log=print,
 ):
     """Write one caption per image to `out_path` (JSONL), skipping images already done.
 
     A caption made with a different prompt is redone, so changing the prompt never mixes
     two prompts in one file. Rows: {"id", "caption", "model", "prompt_fp", ...}.
+    `extra_body` is passed through to the server, e.g. to switch off a model's thinking mode.
     """
     pfp = prompt_fp(prompt)
     done = {
@@ -48,7 +50,14 @@ def run_captions(
             {"type": "image_url", "image_url": {"url": image_url(bench.images[image_id])}},
             {"type": "text", "text": prompt},
         ]
-        r = chat(client, model, content, max_tokens=max_tokens, temperature=temperature)
+        r = chat(
+            client,
+            model,
+            content,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            extra_body=extra_body or None,
+        )
         choice = r.choices[0]
         return {
             "id": image_id,

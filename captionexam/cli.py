@@ -1,6 +1,7 @@
 """Command line: download · caption · judge · board."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -41,6 +42,7 @@ def cmd_caption(args):
         temperature=args.temperature,
         workers=args.workers,
         images=args.images.split(",") if args.images else None,
+        extra_body=json.loads(args.extra_body) if args.extra_body else None,
     )
 
 
@@ -95,6 +97,12 @@ def main(argv=None):
     c.add_argument("--temperature", type=float, default=0.0)
     c.add_argument("--workers", type=int, default=8)
     c.add_argument("--images", default=None, help="comma-separated image ids (default: all)")
+    c.add_argument(
+        "--extra-body",
+        default=None,
+        help='JSON passed through to the server, e.g. \'{"chat_template_kwargs": '
+        '{"enable_thinking": false}}\'',
+    )
     c.set_defaults(func=cmd_caption)
 
     for name, help_ in (("judge", "judge captions"), ("board", "print the leaderboard")):
