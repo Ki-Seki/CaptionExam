@@ -458,8 +458,10 @@ class Runner:
                     self.to_judge.put(m["name"])
         else:
             self.run_captioners()
+            # judge-only runs keep the summary of the captioning run
+            summary = json.dumps(self.summary, indent=1) + "\n"
+            (self.results / "run_summary.json").write_text(summary)
         self.captioning_done.set()
-        (self.results / "run_summary.json").write_text(json.dumps(self.summary, indent=1) + "\n")
         if lane is not None:
             lane.join()
             log("\n" + render(self.write_board()))
